@@ -105,6 +105,17 @@ def track_task(task: asyncio.Task) -> None:
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
 
+async def check_admin_or_owner(chat, user_id: int, owner_id: str) -> bool:
+    if chat.type in ["private"]:
+        return True
+    try:
+        chat_member = await chat.get_member(user_id)
+        if chat_member.status in ['creator', 'administrator']:
+            return True
+    except TelegramError:
+        pass
+    return str(user_id) == str(owner_id)
+
 # ==========================================
 # 3. DATABASE & REDIS INFRASTRUCTURE
 # ==========================================
@@ -448,6 +459,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_settings_keyboard(context.user_data)
     )
 
+# --- PAUSE / RESUME & CANCEL HANDLERS ---
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -458,20 +470,66 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No active quiz running in this chat.")
         return
 
-    if chat.type in ["group", "supergroup"]:
-        try:
-            chat_member = await context.bot.get_chat_member(chat.id, user.id)
-            is_admin = chat_member.status in ['creator', 'administrator']
-        except TelegramError:
-            is_admin = False
+    owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
+    is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
 
-        owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
-        if not (is_admin or str(user.id) == str(owner_id)):
-            await update.message.reply_text("⚠️ Permission Denied! Only Admins or Host can stop the quiz.")
-            return
+    if not is_authorized:
+        await update.message.reply_text("⚠️ Permission Denied! Only Admins or Quiz Host can pause the quiz.")
+        return
+
+    await redis_client.set(f"quiz_pause:{chat_key}", "1", ex=86400)
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ Resume Quiz", callback_data=f"resume_quiz_{chat_key}")]
+    ])
+    await update.message.reply_text(
+        "⏸️ <b>Quiz Pause Ho Gaya Hai.</b>\nDobara start karne ke liye niche button par click karein:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    chat_key = str(chat.id)
+
+    is_active = await redis_client.get(f"quiz_active:{chat_key}")
+    if not is_active:
+        await update.message.reply_text("❌ No active quiz running in this chat.")
+        return
+
+    owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
+    is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
+
+    if not is_authorized:
+        await update.message.reply_text("⚠️ Permission Denied! Only Admins or Quiz Host can cancel the quiz.")
+        return
 
     await redis_client.set(f"quiz_stop:{chat_key}", "1", ex=3600)
-    await update.message.reply_text("🛑 Stopping the quiz safely...")
+    await redis_client.delete(f"quiz_pause:{chat_key}")
+    await update.message.reply_text("🛑 Stopping and cancelling the quiz completely...")
+
+async def resume_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat = query.message.chat
+    user = query.from_user
+    chat_key = str(chat.id)
+
+    is_paused = await redis_client.get(f"quiz_pause:{chat_key}")
+    if not is_paused:
+        await query.answer("❌ No paused quiz found.", show_alert=True)
+        return
+
+    owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
+    is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
+
+    if not is_authorized:
+        await query.answer("⚠️ Sirf Admin ya Quiz Host hi quiz resume kar sakta hai!", show_alert=True)
+        return
+
+    await redis_client.delete(f"quiz_pause:{chat_key}")
+    await query.answer("▶️ Resuming Quiz...")
+    await query.edit_message_text("▶️ <b>Quiz wahin se dobara start ho raha hai...</b>", parse_mode="HTML")
 
 async def show_my_quizzes(query_or_update, context):
     user_id = query_or_update.from_user.id if hasattr(query_or_update, "from_user") else query_or_update.effective_user.id
@@ -503,6 +561,10 @@ async def show_my_quizzes(query_or_update, context):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+
+    if data.startswith("resume_quiz_"):
+        await resume_quiz_callback(update, context)
+        return
 
     if data == "create":
         if query.message.chat.type != "private":
@@ -764,11 +826,23 @@ async def run_quiz_loop(chat_key: str, chat_id: int, questions: list, context: C
     total_questions = len(questions)
 
     try:
-        for index, q in enumerate(questions, start=1):
+        index = 1
+        while index <= total_questions:
+            # Check if cancelled or stopped
             stopped = await redis_client.get(f"quiz_stop:{chat_key}")
             if stopped:
                 break
 
+            # Check if paused (Wait in loop until resumed or stopped)
+            while await redis_client.get(f"quiz_pause:{chat_key}"):
+                await asyncio.sleep(1)
+                if await redis_client.get(f"quiz_stop:{chat_key}"):
+                    break
+
+            if await redis_client.get(f"quiz_stop:{chat_key}"):
+                break
+
+            q = questions[index - 1]
             options = list(q["options"])
             correct_index = q["correct"]
 
@@ -812,13 +886,19 @@ async def run_quiz_loop(chat_key: str, chat_id: int, questions: list, context: C
                 await redis_client.delete(f"quiz_next:{chat_key}")
                 wait_time = 0.0
                 while wait_time < timer:
-                    if await redis_client.get(f"quiz_next:{chat_key}") or await redis_client.get(f"quiz_stop:{chat_key}"):
+                    if await redis_client.get(f"quiz_next:{chat_key}") or await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
                         break
                     await asyncio.sleep(0.5)
                     wait_time += 0.5
             else:
-                await asyncio.sleep(timer)
+                elapsed = 0.0
+                while elapsed < timer:
+                    if await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
+                        break
+                    await asyncio.sleep(0.5)
+                    elapsed += 0.5
 
+            index += 1
             await asyncio.sleep(1.2)
     finally:
         await finish_quiz(chat_key, context, chat_id=chat_id)
@@ -981,6 +1061,7 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
             f"quiz_active:{chat_key}",
             f"quiz_state:{chat_key}",
             f"quiz_stop:{chat_key}",
+            f"quiz_pause:{chat_key}",
             f"quiz_next:{chat_key}",
             f"participants:{chat_key}",
             f"scores:{chat_key}",
@@ -1067,6 +1148,7 @@ def main():
     app.add_handler(CommandHandler(["create", "newquiz"], create_command))
     app.add_handler(CommandHandler(["done"], done_command))
     app.add_handler(CommandHandler(["stop"], stop_command))
+    app.add_handler(CommandHandler(["cancel"], cancel_command))
     app.add_handler(CommandHandler(["quizzes"], show_my_quizzes))
 
     app.add_handler(CallbackQueryHandler(creation_button_handler, pattern="^(finish_creation|cancel_creation)$"))
