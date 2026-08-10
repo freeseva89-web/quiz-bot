@@ -108,13 +108,20 @@ def track_task(task: asyncio.Task) -> None:
 async def check_admin_or_owner(chat, user_id: int, owner_id: str) -> bool:
     if chat.type in ["private"]:
         return True
+    
+    # 1. Check if user is Quiz Creator/Host
+    if owner_id and str(user_id) == str(owner_id):
+        return True
+
+    # 2. Check Telegram Group Admin Permissions
     try:
         chat_member = await chat.get_member(user_id)
         if chat_member.status in ['creator', 'administrator']:
             return True
-    except TelegramError:
-        pass
-    return str(user_id) == str(owner_id)
+    except TelegramError as e:
+        logger.error(f"Error checking admin status: {e}")
+        
+    return False
 
 # ==========================================
 # 3. DATABASE & REDIS INFRASTRUCTURE
@@ -459,7 +466,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_settings_keyboard(context.user_data)
     )
 
-# --- PAUSE / RESUME & CANCEL HANDLERS ---
+# --- STRICT CONTROL HANDLERS (STOP/PAUSE & CANCEL) ---
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -474,7 +481,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
 
     if not is_authorized:
-        await update.message.reply_text("⚠️ Permission Denied! Only Admins or Quiz Host can pause the quiz.")
+        await update.message.reply_text("⚠️ Permission Denied! Only Group Admins or Quiz Host can pause the quiz.")
         return
 
     await redis_client.set(f"quiz_pause:{chat_key}", "1", ex=86400)
@@ -502,7 +509,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
 
     if not is_authorized:
-        await update.message.reply_text("⚠️ Permission Denied! Only Admins or Quiz Host can cancel the quiz.")
+        await update.message.reply_text("⚠️ Permission Denied! Only Group Admins or Quiz Host can cancel the quiz.")
         return
 
     await redis_client.set(f"quiz_stop:{chat_key}", "1", ex=3600)
