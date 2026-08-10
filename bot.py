@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Optional, Any
 
 import asyncpg
 import redis.asyncio as aioredis
+from aiohttp import web
 
 from telegram import (
     Update,
@@ -40,12 +41,12 @@ from telegram.ext import (
 # 1. CONFIGURATION & ENVIRONMENT SETUP
 # ==========================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "Advance_QuizBot")
+BOT_USERNAME = ""  # Automatically detected in post_init
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://quizuser:password@localhost:5432/quizdb")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-PORT = int(os.getenv("PORT", "8443"))
+PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "super_secret_webhook_token_123")
 
 MAX_TELEGRAM_MSG_LEN = 3800
@@ -61,6 +62,19 @@ db_pool: Optional[asyncpg.Pool] = None
 redis_client: Optional[aioredis.Redis] = None
 telegram_rate_limiter = asyncio.Semaphore(30)
 background_tasks: set = set()
+
+# --- HEALTH CHECK DUMMY SERVER FOR RENDER ---
+async def handle_health(request):
+    return web.Response(text="Quiz Bot Web Engine Active")
+
+async def start_dummy_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"✅ Render Dummy Web Server running on port {PORT}")
 
 # ==========================================
 # 2. UTILITY & HELPERS
@@ -446,14 +460,14 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat.type in ["group", "supergroup"]:
         try:
-            chat_admins = await context.bot.get_chat_administrators(chat.id)
-            admin_ids = [admin.user.id for admin in chat_admins]
+            chat_member = await context.bot.get_chat_member(chat.id, user.id)
+            is_admin = chat_member.status in ['creator', 'administrator']
         except TelegramError:
-            admin_ids = []
+            is_admin = False
 
         owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
-        if not (str(user.id) == str(owner_id) or user.id in admin_ids):
-            await update.message.reply_text("⚠️ Permission Denied!", parse_mode="HTML")
+        if not (is_admin or str(user.id) == str(owner_id)):
+            await update.message.reply_text("⚠️ Permission Denied! Only Admins or Host can stop the quiz.")
             return
 
     await redis_client.set(f"quiz_stop:{chat_key}", "1", ex=3600)
@@ -846,7 +860,9 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     composite_rank = (score * 1000000) - min(total_time, 999999.0)
     await redis_client.zadd(f"leaderboard:{chat_key}", {str(user.id): composite_rank})
 
-    if update.effective_chat and update.effective_chat.type == "private":
+    # Trigger fast-skip in private chat
+    chat_id = int(chat_key)
+    if chat_id > 0:
         await redis_client.set(f"quiz_next:{chat_key}", "1", ex=60)
 
 async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
@@ -986,7 +1002,6 @@ async def persist_results_to_db(chat_key: str, leaderboard: list):
         quiz_info = await redis_client.hgetall(f"quiz_state:{chat_key}")
         quiz_id = int(quiz_info.get("quiz_id") or 0)
         
-        # If quiz_id was 0 (e.g. temporary quiz), fallback to null-safe handling
         quiz_id_val = quiz_id if quiz_id > 0 else None
 
         async with db_pool.acquire() as conn:
@@ -1007,6 +1022,12 @@ async def persist_results_to_db(chat_key: str, leaderboard: list):
 # 7. LIFECYCLE & MAIN EXECUTION
 # ==========================================
 async def post_init(application: Application):
+    global BOT_USERNAME
+    bot_info = await application.bot.get_me()
+    BOT_USERNAME = bot_info.username
+    logger.info(f"🤖 Bot Username Automatically Detected: @{BOT_USERNAME}")
+
+    await start_dummy_server()
     await init_infrastructure()
     
     if WEBHOOK_URL:
@@ -1063,7 +1084,7 @@ def main():
             webhook_url=f"{WEBHOOK_URL}/telegram/{BOT_TOKEN}"
         )
     else:
-        logger.info("⚡ Starting Bot in Polling Mode...")
+        logger.info("⚡ Starting Bot in Polling Mode with Background Dummy Server...")
         app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
