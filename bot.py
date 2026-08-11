@@ -516,6 +516,31 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await redis_client.delete(f"quiz_pause:{chat_key}")
     await update.message.reply_text("🛑 Stopping and cancelling the quiz completely...")
 
+async def force_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    chat_key = str(chat.id)
+
+    owner_id = await redis_client.hget(f"quiz_state:{chat_key}", "owner_id")
+    is_authorized = await check_admin_or_owner(chat, user.id, owner_id)
+
+    if not is_authorized:
+        await update.message.reply_text("⚠️ Permission Denied! Only Group Admins or Quiz Host can reset the quiz.")
+        return
+
+    await redis_client.delete(
+        f"quiz_active:{chat_key}",
+        f"quiz_state:{chat_key}",
+        f"quiz_stop:{chat_key}",
+        f"quiz_pause:{chat_key}",
+        f"quiz_next:{chat_key}",
+        f"participants:{chat_key}",
+        f"scores:{chat_key}",
+        f"times:{chat_key}",
+        f"leaderboard:{chat_key}"
+    )
+    await update.message.reply_text("🧹 <b>Quiz state completely reset!</b> You can start a new quiz now.", parse_mode="HTML")
+
 async def resume_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat = query.message.chat
@@ -836,11 +861,10 @@ async def run_quiz_loop(chat_key: str, chat_id: int, questions: list, context: C
         index = 1
         while index <= total_questions:
             # Check if cancelled or stopped
-            stopped = await redis_client.get(f"quiz_stop:{chat_key}")
-            if stopped:
+            if await redis_client.get(f"quiz_stop:{chat_key}"):
                 break
 
-            # Check if paused (Wait in loop until resumed or stopped)
+            # Check if paused (Wait gracefully without CPU spiking)
             while await redis_client.get(f"quiz_pause:{chat_key}"):
                 await asyncio.sleep(1)
                 if await redis_client.get(f"quiz_stop:{chat_key}"):
@@ -889,21 +913,14 @@ async def run_quiz_loop(chat_key: str, chat_id: int, questions: list, context: C
             )
 
             is_private = (chat_id > 0)
-            if is_private:
-                await redis_client.delete(f"quiz_next:{chat_key}")
-                wait_time = 0.0
-                while wait_time < timer:
-                    if await redis_client.get(f"quiz_next:{chat_key}") or await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
-                        break
-                    await asyncio.sleep(0.5)
-                    wait_time += 0.5
-            else:
-                elapsed = 0.0
-                while elapsed < timer:
-                    if await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
-                        break
-                    await asyncio.sleep(0.5)
-                    elapsed += 0.5
+            wait_time = 0.0
+            while wait_time < timer:
+                if await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
+                    break
+                if is_private and await redis_client.get(f"quiz_next:{chat_key}"):
+                    break
+                await asyncio.sleep(0.5)
+                wait_time += 0.5
 
             index += 1
             await asyncio.sleep(1.2)
@@ -932,7 +949,7 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     time_taken = max(0.1, time.time() - q_start_time)
-    user_name = html.escape(user.full_name)
+    user_name = user.full_name
 
     await redis_client.hset(f"participants:{chat_key}", str(user.id), user_name)
 
@@ -988,6 +1005,9 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 tm = float(times.get(uid, 0.0))
                 leaderboard.append((int(uid), name, sc, tm))
 
+            # Database me score store hone ka wait karenge tabhi Redis clear karenge
+            await persist_results_to_db(chat_key, leaderboard)
+
             avg_time = sum(t for _, _, _, t in leaderboard) / total_candidates
             real_topper = leaderboard[0]
             class_avg_score = sum(s for _, _, s, _ in leaderboard) / total_candidates
@@ -1021,14 +1041,14 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 if rank <= 3:
                     badge = medals[rank - 1]
                     line = (
-                        f"{badge} <b>{name}</b>\n"
+                        f"{badge} <b>{html.escape(name)}</b>\n"
                         f"   📊 Score: {score}/{total_q}  {pbar} {pct:.0f}%\n"
                         f"   🕓 Time: {t_secs:.1f}s\n"
                         f"   🎯 Status: {status_str}\n\n"
                     )
                 else:
                     line = (
-                        f"<b>{rank}. {name}</b>\n"
+                        f"<b>{rank}. {html.escape(name)}</b>\n"
                         f"   • {score}/{total_q} Marks ({pct:.0f}%) | Time: {t_secs:.1f}s\n\n"
                     )
 
@@ -1044,7 +1064,7 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
             footer = (
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"• Class Average : {class_avg_score:.1f} / {total_q}\n"
-                f"• Top Ranker ⚡: <b>{real_topper[1]}</b> ({real_topper[3]:.1f}s)\n"
+                f"• Top Ranker ⚡: <b>{html.escape(real_topper[1])}</b> ({real_topper[3]:.1f}s)\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
 
@@ -1061,8 +1081,6 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 await context.bot.send_message(target_chat_id, chunk, parse_mode="HTML")
             except TelegramError:
                 pass
-
-            asyncio.create_task(persist_results_to_db(chat_key, leaderboard))
 
         await redis_client.delete(
             f"quiz_active:{chat_key}",
@@ -1154,8 +1172,11 @@ def main():
     app.add_handler(CommandHandler(["start"], start_handler))
     app.add_handler(CommandHandler(["create", "newquiz"], create_command))
     app.add_handler(CommandHandler(["done"], done_command))
-    app.add_handler(CommandHandler(["stop"], stop_command))
-    app.add_handler(CommandHandler(["cancel"], cancel_command))
+    
+    app.add_handler(CommandHandler(["stop", "endquiz", "pause"], stop_command))
+    app.add_handler(CommandHandler(["cancel", "stopquiz", "kill"], cancel_command))
+    app.add_handler(CommandHandler(["resetquiz", "clearquiz", "reset"], force_reset_command))
+    
     app.add_handler(CommandHandler(["quizzes"], show_my_quizzes))
 
     app.add_handler(CallbackQueryHandler(creation_button_handler, pattern="^(finish_creation|cancel_creation)$"))
