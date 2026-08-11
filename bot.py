@@ -841,7 +841,7 @@ async def send_poll_with_rate_limit(context, chat_id, question, options, correct
                     type=Poll.QUIZ,
                     correct_option_id=correct_index,
                     explanation=explanation,
-                    open_period=timer,
+                    open_period=int(timer),
                     is_anonymous=False
                 )
             except RetryAfter as e:
@@ -914,16 +914,23 @@ async def run_quiz_loop(chat_key: str, chat_id: int, questions: list, context: C
 
             is_private = (chat_id > 0)
             wait_time = 0.0
+            
+            # --- TIMER & FAST SKIP CONTROL LOGIC ---
             while wait_time < timer:
                 if await redis_client.get(f"quiz_stop:{chat_key}") or await redis_client.get(f"quiz_pause:{chat_key}"):
                     break
+                
+                # Private chat mein answer click hone par 1 second safe delay leke skip karega
                 if is_private and await redis_client.get(f"quiz_next:{chat_key}"):
+                    await redis_client.delete(f"quiz_next:{chat_key}")
+                    await asyncio.sleep(1.0) # Graceful 1s buffer delay
                     break
+                
                 await asyncio.sleep(0.5)
                 wait_time += 0.5
 
             index += 1
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.0)
     finally:
         await finish_quiz(chat_key, context, chat_id=chat_id)
 
