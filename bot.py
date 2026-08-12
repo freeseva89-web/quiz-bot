@@ -102,13 +102,13 @@ def get_progress_bar(score: int, total: int) -> str:
     return "▰" * filled + "▱" * (10 - filled)
 
 def format_time(seconds: float) -> str:
-    """Converts seconds into minutes and seconds format (e.g., 130.1s -> 2m 10s)"""
+    """Formats seconds into readable time (e.g., 16s, 1m 05s, 1m 59s)."""
     total_secs = int(round(seconds))
+    if total_secs < 60:
+        return f"{total_secs}s"
     mins = total_secs // 60
     secs = total_secs % 60
-    if mins > 0:
-        return f"{mins}m {secs}s"
-    return f"{secs}s"
+    return f"{mins}m {secs:02d}s"
 
 def track_task(task: asyncio.Task) -> None:
     background_tasks.add(task)
@@ -398,6 +398,21 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📖 <b>Quiz Bot Help & Commands</b>\n\n"
+        "• /start - Start the bot\n"
+        "• /create - Create a new quiz step-by-step\n"
+        "• /quizzes - List all available quizzes\n"
+        "• /stop, /pause - Pause current ongoing quiz\n"
+        "• /cancel - Cancel ongoing quiz session\n"
+        "• /resetquiz - Reset active quiz state\n"
+        "• /help - Show this guidance message\n\n"
+        "💡 <i>Mark * or + against the correct option when adding questions.</i>"
+    )
+    if update.message:
+        await update.message.reply_text(help_text, parse_mode="HTML")
+
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
     if not query:
@@ -638,7 +653,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "help":
         await query.answer()
-        await query.edit_message_text("📖 <b>HELP</b>\n\nMark * Or + Against The Correct Option", parse_mode="HTML")
+        help_text = (
+            "📖 <b>Quiz Bot Help & Commands</b>\n\n"
+            "• /start - Start the bot\n"
+            "• /create - Create a new quiz step-by-step\n"
+            "• /quizzes - List all available quizzes\n"
+            "• /stop, /pause - Pause current ongoing quiz\n"
+            "• /cancel - Cancel ongoing quiz session\n"
+            "• /resetquiz - Reset active quiz state\n"
+            "• /help - Show this guidance message\n\n"
+            "💡 <i>Mark * or + against the correct option when adding questions.</i>"
+        )
+        await query.edit_message_text(help_text, parse_mode="HTML")
         return
 
     if data == "back_start":
@@ -1005,7 +1031,6 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
 
     try:
         target_chat_id = chat_id if chat_id is not None else int(chat_key)
-        stopped = await redis_client.get(f"quiz_stop:{chat_key}")
 
         quiz_info = await redis_client.hgetall(f"quiz_state:{chat_key}")
         title = quiz_info.get("title", "Quiz")
@@ -1018,7 +1043,7 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
         total_candidates = len(participants)
 
         if total_candidates == 0:
-            msg = f"🏆 {title}\n\nNobody participated in this quiz."
+            msg = f"📌 {title}\n\n🏆 QUIZ RESULT\n━━━━━━━━━━━━\n👥 Total Candidates: 0\n━━━━━━━━━━━━\n\nNobody participated in this quiz."
             try:
                 await context.bot.send_message(target_chat_id, msg)
             except TelegramError:
@@ -1035,46 +1060,30 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
 
             await persist_results_to_db(chat_key, leaderboard)
 
-            avg_time_sec = sum(t for _, _, _, t in leaderboard) / total_candidates
-            real_topper = leaderboard[0]
-            class_avg_score = sum(s for _, _, s, _ in leaderboard) / total_candidates
-
-            header_title = "🛑 QUIZ STOPPED REPORT" if stopped else "🏆 QUIZ RESULT DASHBOARD"
-
-            # Plain text header format with Title outside dashboard on top
+            # Updated Clean Leaderboard Output
             header = (
-                f"📌 Quiz: {title}\n\n"
-                "┌──────────────────────────────────────┐\n"
-                f"│       {header_title}       │\n"
-                "└──────────────────────────────────────┘\n"
-                f"👥 Total Candidates : {total_candidates}\n"
-                f"⏱ Avg Time         : {format_time(avg_time_sec)}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📌 {title}\n\n"
+                "🏆 QUIZ RESULT\n"
+                "━━━━━━━━━━━━\n"
+                f"👥 Total Candidates: {total_candidates}\n"
+                "━━━━━━━━━━━━\n\n"
             )
 
             medals = ["🥇", "🥈", "🥉"]
             chunk = header
 
-            for rank, (uid, name, score, t_secs) in enumerate(leaderboard, start=1):
-                beaten = total_candidates - rank
-                pct = (score / total_q * 100) if total_q > 0 else 0
-                pbar = get_progress_bar(score, total_q)
+            for idx, (uid, name, score, t_secs) in enumerate(leaderboard):
+                rank_str = medals[idx] if idx < 3 else f"{idx + 1}."
+                formatted_t = format_time(t_secs)
 
-                if total_candidates > 1:
-                    percentile_val = (beaten / (total_candidates - 1)) * 100
-                    percentile_str = f"{percentile_val:.1f}%"
-                else:
-                    percentile_str = "100%"
-
-                badge = medals[rank - 1] if rank <= 3 else f"{rank}."
-
-                # Clean Multi-line Plain Text Structure per candidate
                 line = (
-                    f"{badge} {name}\n"
-                    f"   📊 Score      : {score}/{total_q}  {pbar} {pct:.0f}%\n"
-                    f"   🕓 Time       : {format_time(t_secs)}\n"
-                    f"   🎯 Percentile : {percentile_str}\n\n"
+                    f"{rank_str} {name}\n"
+                    f"🎯 Score : {score}/{total_q}\n"
+                    f"⏱️ Time  : {formatted_t}\n\n"
                 )
+
+                if idx == 2 and total_candidates > 3:
+                    line += "━━━━━━━━━━━━\n\n"
 
                 if len(chunk) + len(line) > MAX_TELEGRAM_MSG_LEN:
                     try:
@@ -1085,12 +1094,8 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 else:
                     chunk += line
 
-            footer = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• Class Average : {class_avg_score:.1f} / {total_q}\n"
-                f"• Top Ranker ⚡: {real_topper[1]} ({format_time(real_topper[3])})\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
+            top_ranker_name = leaderboard[0][1] if leaderboard else "None"
+            footer = f"━━━━━━━━━━━━\n\n🔥 Top Ranker: {top_ranker_name}"
 
             if len(chunk) + len(footer) > MAX_TELEGRAM_MSG_LEN:
                 try:
@@ -1194,6 +1199,7 @@ def main():
     )
 
     app.add_handler(CommandHandler(["start"], start_handler))
+    app.add_handler(CommandHandler(["help"], help_handler))
     app.add_handler(CommandHandler(["create", "newquiz"], create_command))
     app.add_handler(CommandHandler(["done"], done_command))
     
