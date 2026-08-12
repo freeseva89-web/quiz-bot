@@ -101,6 +101,15 @@ def get_progress_bar(score: int, total: int) -> str:
     filled = int(round(percentage / 10))
     return "▰" * filled + "▱" * (10 - filled)
 
+def format_time(seconds: float) -> str:
+    """Converts seconds into minutes and seconds format (e.g., 130.1s -> 2m 10s)"""
+    total_secs = int(round(seconds))
+    mins = total_secs // 60
+    secs = total_secs % 60
+    if mins > 0:
+        return f"{mins}m {secs}s"
+    return f"{secs}s"
+
 def track_task(task: asyncio.Task) -> None:
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
@@ -316,10 +325,9 @@ def build_settings_keyboard(data: dict) -> InlineKeyboardMarkup:
     keyboard = [[InlineKeyboardButton("▶️ Start Quiz", callback_data="start_quiz")]]
 
     if short_code:
-        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=quiz_{short_code}"
         group_url = f"https://t.me/{BOT_USERNAME}?startgroup=quiz_{short_code}"
         keyboard.append([InlineKeyboardButton("➕ Start in Group", url=group_url)])
-        keyboard.append([InlineKeyboardButton("📲 Share Quiz", url=share_url)])
+        keyboard.append([InlineKeyboardButton("📲 Share Quiz", switch_inline_query=f"quiz:{short_code}")])
 
     keyboard.extend([
         [
@@ -329,10 +337,11 @@ def build_settings_keyboard(data: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"💡 Exp: {explanation}", callback_data="toggle_exp")],
         [
             InlineKeyboardButton(f"{'🔘 ' if timer == 10 else ''}10s", callback_data="set_timer_10"),
-            InlineKeyboardButton(f"{'🔘 ' if timer == 20 else ''}20s", callback_data="set_timer_20"),
-            InlineKeyboardButton(f"{'🔘 ' if timer == 30 else ''}30s", callback_data="set_timer_30")
+            InlineKeyboardButton(f"{'🔘 ' if timer == 15 else ''}15s", callback_data="set_timer_15"),
+            InlineKeyboardButton(f"{'🔘 ' if timer == 20 else ''}20s", callback_data="set_timer_20")
         ],
         [
+            InlineKeyboardButton(f"{'🔘 ' if timer == 30 else ''}30s", callback_data="set_timer_30"),
             InlineKeyboardButton(f"{'🔘 ' if timer == 45 else ''}45s", callback_data="set_timer_45"),
             InlineKeyboardButton(f"{'🔘 ' if timer == 60 else ''}60s", callback_data="set_timer_60")
         ]
@@ -367,11 +376,11 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await begin_quiz(update.effective_chat.id, context)
                 return
 
-            share_link = f"https://t.me/{BOT_USERNAME}?start=quiz_{short_code}"
+            share_link = f"@{BOT_USERNAME} quiz:{short_code}"
             await update.message.reply_text(
                 f"👍 Loaded: <b>{html.escape(title)}</b>\n"
                 f"📋 Questions: {len(questions)}\n\n"
-                f"Share Link:\n<code>{share_link}</code>",
+                f"Share Code:\n<code>{share_link}</code>",
                 parse_mode="HTML",
                 reply_markup=build_settings_keyboard(context.user_data)
             )
@@ -394,27 +403,39 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query:
         return
 
-    code = query.replace("quiz_", "")
+    code = query.replace("quiz_", "").replace("quiz:", "").strip()
     loaded = await load_quiz_by_code_or_id(code)
 
     results = []
     if loaded:
         _, title, questions, short_code, _ = loaded
         start_link = f"https://t.me/{BOT_USERNAME}?start=quiz_{short_code}"
+        start_group_link = f"https://t.me/{BOT_USERNAME}?startgroup=quiz_{short_code}"
         
+        message_text = (
+            f"🎲 Quiz '■ <b>{html.escape(title)}</b> ■'\n\n"
+            f"🖊 <b>{len(questions)} questions</b>"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Start this quiz", url=start_link)],
+            [InlineKeyboardButton("👥 Start quiz in group", url=start_group_link)],
+            [InlineKeyboardButton("🔗 Share quiz", switch_inline_query=f"quiz:{short_code}")]
+        ])
+
         results.append(
             InlineQueryResultArticle(
                 id=short_code,
-                title=f"📝 Start Quiz: {title}",
-                description=f"Questions: {len(questions)}",
+                title=f"■ {title} ■",
+                description=f"{len(questions)} questions",
                 input_message_content=InputTextMessageContent(
-                    f"<b>{html.escape(title)}</b>\n\n📋 Questions: {len(questions)}",
+                    message_text,
                     parse_mode="HTML"
                 ),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start Quiz", url=start_link)]])
+                reply_markup=keyboard
             )
         )
-    await update.inline_query.answer(results, cache_time=0)
+    await update.inline_query.answer(results, cache_time=1)
 
 async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -455,13 +476,13 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timer": 20
     })
 
-    share_link = f"https://t.me/{BOT_USERNAME}?start=quiz_{short_code}"
+    share_link = f"@{BOT_USERNAME} quiz:{short_code}"
 
     await update.message.reply_text(
         f"✅ <b>Quiz Created Successfully!</b>\n\n"
         f"📌 Title: <b>{html.escape(title)}</b>\n"
         f"📋 Questions: {len(questions)}\n\n"
-        f"Share Link:\n<code>{share_link}</code>",
+        f"Share Code:\n<code>{share_link}</code>",
         parse_mode="HTML",
         reply_markup=build_settings_keyboard(context.user_data)
     )
@@ -662,11 +683,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "timer": 20
         })
 
-        share_link = f"https://t.me/{BOT_USERNAME}?start=quiz_{short_code}"
+        share_link = f"@{BOT_USERNAME} quiz:{short_code}"
         await query.edit_message_text(
             f"👍 Loaded: <b>{html.escape(title)}</b>\n"
             f"📋 Questions: {len(questions)}\n\n"
-            f"Share Link:\n<code>{share_link}</code>",
+            f"Share Code:\n<code>{share_link}</code>",
             parse_mode="HTML",
             reply_markup=build_settings_keyboard(context.user_data)
         )
@@ -997,9 +1018,9 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
         total_candidates = len(participants)
 
         if total_candidates == 0:
-            msg = f"🏆 <b>{html.escape(title)}</b>\n\nNobody participated in this quiz."
+            msg = f"🏆 {title}\n\nNobody participated in this quiz."
             try:
-                await context.bot.send_message(target_chat_id, msg, parse_mode="HTML")
+                await context.bot.send_message(target_chat_id, msg)
             except TelegramError:
                 pass
         else:
@@ -1012,22 +1033,22 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 tm = float(times.get(uid, 0.0))
                 leaderboard.append((int(uid), name, sc, tm))
 
-            # Database me score store hone ka wait karenge tabhi Redis clear karenge
             await persist_results_to_db(chat_key, leaderboard)
 
-            avg_time = sum(t for _, _, _, t in leaderboard) / total_candidates
+            avg_time_sec = sum(t for _, _, _, t in leaderboard) / total_candidates
             real_topper = leaderboard[0]
             class_avg_score = sum(s for _, _, s, _ in leaderboard) / total_candidates
 
             header_title = "🛑 QUIZ STOPPED REPORT" if stopped else "🏆 QUIZ RESULT DASHBOARD"
 
+            # Plain text header format with Title outside dashboard on top
             header = (
+                f"📌 Quiz: {title}\n\n"
                 "┌──────────────────────────────────────┐\n"
                 f"│       {header_title}       │\n"
                 "└──────────────────────────────────────┘\n"
-                f"📌 Title : <b>{html.escape(title)}</b>\n"
-                f"👥 Total : {total_candidates} Candidates\n"
-                f"⏱ Avg Time : {avg_time:.1f}s\n"
+                f"👥 Total Candidates : {total_candidates}\n"
+                f"⏱ Avg Time         : {format_time(avg_time_sec)}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             )
 
@@ -1040,28 +1061,24 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 pbar = get_progress_bar(score, total_q)
 
                 if total_candidates > 1:
-                    percentile = (beaten / (total_candidates - 1)) * 100
-                    status_str = f"Ahead of {beaten} Candidates ({percentile:.1f}%)"
+                    percentile_val = (beaten / (total_candidates - 1)) * 100
+                    percentile_str = f"{percentile_val:.1f}%"
                 else:
-                    status_str = "Top Performer"
+                    percentile_str = "100%"
 
-                if rank <= 3:
-                    badge = medals[rank - 1]
-                    line = (
-                        f"{badge} <b>{html.escape(name)}</b>\n"
-                        f"   📊 Score: {score}/{total_q}  {pbar} {pct:.0f}%\n"
-                        f"   🕓 Time: {t_secs:.1f}s\n"
-                        f"   🎯 Status: {status_str}\n\n"
-                    )
-                else:
-                    line = (
-                        f"<b>{rank}. {html.escape(name)}</b>\n"
-                        f"   • {score}/{total_q} Marks ({pct:.0f}%) | Time: {t_secs:.1f}s\n\n"
-                    )
+                badge = medals[rank - 1] if rank <= 3 else f"{rank}."
+
+                # Clean Multi-line Plain Text Structure per candidate
+                line = (
+                    f"{badge} {name}\n"
+                    f"   📊 Score      : {score}/{total_q}  {pbar} {pct:.0f}%\n"
+                    f"   🕓 Time       : {format_time(t_secs)}\n"
+                    f"   🎯 Percentile : {percentile_str}\n\n"
+                )
 
                 if len(chunk) + len(line) > MAX_TELEGRAM_MSG_LEN:
                     try:
-                        await context.bot.send_message(target_chat_id, chunk, parse_mode="HTML")
+                        await context.bot.send_message(target_chat_id, chunk)
                     except TelegramError:
                         pass
                     chunk = line
@@ -1071,13 +1088,13 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
             footer = (
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"• Class Average : {class_avg_score:.1f} / {total_q}\n"
-                f"• Top Ranker ⚡: <b>{html.escape(real_topper[1])}</b> ({real_topper[3]:.1f}s)\n"
+                f"• Top Ranker ⚡: {real_topper[1]} ({format_time(real_topper[3])})\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
 
             if len(chunk) + len(footer) > MAX_TELEGRAM_MSG_LEN:
                 try:
-                    await context.bot.send_message(target_chat_id, chunk, parse_mode="HTML")
+                    await context.bot.send_message(target_chat_id, chunk)
                 except TelegramError:
                     pass
                 chunk = footer
@@ -1085,7 +1102,7 @@ async def finish_quiz(chat_key: str, context: ContextTypes.DEFAULT_TYPE, chat_id
                 chunk += footer
 
             try:
-                await context.bot.send_message(target_chat_id, chunk, parse_mode="HTML")
+                await context.bot.send_message(target_chat_id, chunk)
             except TelegramError:
                 pass
 
@@ -1184,7 +1201,7 @@ def main():
     app.add_handler(CommandHandler(["cancel", "stopquiz", "kill"], cancel_command))
     app.add_handler(CommandHandler(["resetquiz", "clearquiz", "reset"], force_reset_command))
     
-    app.add_handler(CommandHandler(["quizzes"], show_my_quizzes))
+    app.add_handler(CommandHandler(["quizzes", "my_quizzes", "myquizzes"], show_my_quizzes))
 
     app.add_handler(CallbackQueryHandler(creation_button_handler, pattern="^(finish_creation|cancel_creation)$"))
     app.add_handler(CallbackQueryHandler(button_handler))
