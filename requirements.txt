@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]
+python-telegram-bot[webhooks]==22.8
 asyncpg
 redis
 aiohttp
