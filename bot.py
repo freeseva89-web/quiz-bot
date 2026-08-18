@@ -1757,10 +1757,10 @@ async def publish_all_polls(
 
                 sent_count += 1
 
-                # Keep a 1-second gap between published polls so Telegram
+                # Keep a 5-second gap between published polls so Telegram
                 # API requests are paced instead of sent in a burst.
                 if index < total:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(5.0)
 
             except RetryAfter as e:
                 # send_poll helper normally handles RetryAfter,
