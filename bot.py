@@ -15,6 +15,13 @@ from typing import Dict, List, Tuple, Optional, Any
 import asyncpg
 import redis.asyncio as aioredis
 from aiohttp import web
+import pytz
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.date import DateTrigger
+
+ist_timezone = pytz.timezone('Asia/Kolkata')
+scheduler = AsyncIOScheduler(timezone=ist_timezone)
 
 from telegram import (
     Update,
@@ -3572,6 +3579,115 @@ def main():
             poll_answer_handler
         )
     )
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /schedule <QUIZ_CODE> <YYYY-MM-DD> <HH:MM>"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not await is_target_chat_admin_or_owner(chat, user.id):
+        await update.message.reply_text("❌ Only admins can schedule quizzes.")
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text("❌ **Usage:** `/schedule <QUIZ_CODE> <YYYY-MM-DD> <HH:MM>`", parse_mode="Markdown")
+        return
+
+    quiz_code, date_str, time_str = context.args[0], context.args[1], context.args[2]
+
+    try:
+        naive_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        run_date = ist_timezone.localize(naive_dt)
+    except ValueError:
+        await update.message.reply_text("❌ Invalid format! Use: `YYYY-MM-DD HH:MM`")
+        return
+
+    loaded = await load_quiz_by_code_or_id(quiz_code)
+    if not loaded:
+        await update.message.reply_text(f"❌ Quiz code `{quiz_code}` not found.")
+        return
+
+    owner_id, title, questions, code, quiz_id = loaded
+    quiz_timer = loaded.get("timer", 20) if isinstance(loaded, dict) else 20
+
+    # Save to Scheduler
+    job_id = f"sch_{chat.id}_{quiz_code}_{int(run_date.timestamp())}"
+    scheduler.add_job(
+        run_scheduled_quiz_job,
+        trigger=DateTrigger(run_date=run_date),
+        args=[chat.id, quiz_code, context.application],
+        id=job_id,
+        replace_existing=True
+    )
+
+    # Save to Database
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO scheduled_quizzes (chat_id, quiz_code, scheduled_time) VALUES ($1, $2, $3)",
+            chat.id, quiz_code, run_date
+        )
+
+    # Confirmation Card
+    confirmation_text = (
+        f"📚 <b>{safe_html(title).upper()}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ <b>QUIZ SCHEDULED SUCCESSFULLY!</b>\n\n"
+        f"📌 <b>Quiz Code:</b> <code>{quiz_code}</code>\n"
+        f"📋 <b>Total Questions:</b> {len(questions)}\n"
+        f"⏱ <b>Time Per Question:</b> {quiz_timer} Seconds\n"
+        f"📅 <b>Date:</b> {date_str}\n"
+        f"⏰ <b>Time:</b> {time_str} IST\n\n"
+        f"🔔 <b>Note:</b> The quiz will automatically start at the set time!\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    await update.message.reply_text(confirmation_text, parse_mode="HTML")
+
+
+async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage: /unschedule <SCHEDULE_ID>"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not await is_target_chat_admin_or_owner(chat, user.id):
+        await update.message.reply_text("❌ Only admins can cancel schedules.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ **Usage:** `/unschedule <SCHEDULE_ID>`", parse_mode="Markdown")
+        return
+
+    schedule_id = context.args[0]
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT quiz_code FROM scheduled_quizzes WHERE id = $1 AND chat_id = $2", int(schedule_id), chat.id)
+        if not row:
+            await update.message.reply_text("❌ No active schedule found with this ID.")
+            return
+
+        quiz_code = row['quiz_code']
+        await conn.execute("DELETE FROM scheduled_quizzes WHERE id = $1", int(schedule_id))
+
+    # Job remove
+    for job in scheduler.get_jobs():
+        if quiz_code in job.id:
+            try:
+                scheduler.remove_job(job.id)
+            except Exception:
+                pass
+
+    cancel_text = (
+        f"❌ <b>QUIZ SCHEDULE CANCELLED!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Quiz Code:</b> <code>{quiz_code}</code>\n"
+        f"🆔 <b>Schedule ID:</b> <code>{schedule_id}</code>\n\n"
+        f"🗑️ <i>This schedule has been successfully removed.</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+    await update.message.reply_text(cancel_text, parse_mode="HTML")
+app.add_handler(CommandHandler("schedule", schedule_command))
+app.add_handler(CommandHandler("unschedule", unschedule_command))
+
+if not scheduler.running:
+    scheduler.start()
 
     if WEBHOOK_URL:
         app.run_webhook(
