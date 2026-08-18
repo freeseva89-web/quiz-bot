@@ -3686,6 +3686,8 @@ async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 app.add_handler(CommandHandler("schedule", schedule_command))
 app.add_handler(CommandHandler("unschedule", unschedule_command))
 
+if not scheduler.running:
+    scheduler.start()
 
     if WEBHOOK_URL:
         app.run_webhook(
@@ -3718,10 +3720,5 @@ app.add_handler(CommandHandler("unschedule", unschedule_command))
                 "inline_query"
             ]
         )
-
-
-
 if __name__ == "__main__":
-    if not scheduler.running:
-        scheduler.start()
     main()
