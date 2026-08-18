@@ -3503,6 +3503,10 @@ def main():
             help_handler
         )
     )
+    app.add_handler(CommandHandler("schedule", schedule_command))
+    app.add_handler(CommandHandler("unschedule", unschedule_command))
+    if not scheduler.running:
+        scheduler.start()
 
     app.add_handler(
         CommandHandler(
