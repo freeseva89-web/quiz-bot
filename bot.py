@@ -1783,10 +1783,10 @@ async def publish_all_polls(
                     )
                     sent_count += 1
 
-                    # Keep a 1-second gap between published polls so Telegram
+                    # Keep a 5-second gap between published polls so Telegram
                     # API requests are paced instead of sent in a burst.
                     if index < total:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(5.0)
 
                 except Exception as retry_error:
                     logger.exception(
@@ -2838,10 +2838,10 @@ async def run_quiz_loop(
             )
 
             # Keep the same UX as the original Live Quiz:
-            # after a private answer, wait 1 second before sending
+            # after a private answer, wait 2 second before sending
             # the next question. This also prevents a burst of polls
             # from being generated immediately after an answer.
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
 
         completed_or_stopped = True
 
