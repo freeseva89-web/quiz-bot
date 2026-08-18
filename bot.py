@@ -3685,10 +3685,8 @@ async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(cancel_text, parse_mode="HTML")
 app.add_handler(CommandHandler("schedule", schedule_command))
 app.add_handler(CommandHandler("unschedule", unschedule_command))
-
 if not scheduler.running:
     scheduler.start()
-
     if WEBHOOK_URL:
         app.run_webhook(
             listen="0.0.0.0",
