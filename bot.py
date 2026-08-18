@@ -3470,8 +3470,21 @@ async def postchannel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def post_init(application):
-    if not scheduler.running:
-        scheduler.start()
+    try:
+        if not scheduler.running:
+            scheduler.start()
+    except Exception:
+        pass
+        
+    # Render Port Scan Timeout Fix
+    import socket
+    s = socket.socket()
+    try:
+        s.bind(("0.0.0.0", int(os.environ.get("PORT", 10000))))
+        s.listen(1)
+    except:
+        pass
+
         
 # ==========================================
 # 21. MAIN
