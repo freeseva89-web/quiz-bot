@@ -3469,7 +3469,10 @@ async def postchannel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=build_publish_target_keyboard()
     )
 
-
+async def post_init(application):
+    if not scheduler.running:
+        scheduler.start()
+        
 # ==========================================
 # 21. MAIN
 # ==========================================
@@ -3505,9 +3508,6 @@ def main():
     )
     app.add_handler(CommandHandler("schedule", schedule_command))
     app.add_handler(CommandHandler("unschedule", unschedule_command))
-    if not scheduler.running:
-        scheduler.start()
-
     app.add_handler(
         CommandHandler(
             ["create", "newquiz"],
