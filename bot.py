@@ -4978,10 +4978,10 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=f"telegram/{BOT_TOKEN}",
+        url_path="webhook",
         secret_token=WEBHOOK_SECRET,
         webhook_url=(
-            f"{WEBHOOK_URL}/telegram/{BOT_TOKEN}"
+            f"{WEBHOOK_URL}/webhook"
         ),
         allowed_updates=[
             "message",
