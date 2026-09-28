@@ -4520,8 +4520,6 @@ def main():
         # Poll answers arrive as independent updates. Bounded concurrency is
         # essential for large groups; the score mutation itself is atomic in Redis.
         .concurrent_updates(UPDATE_CONCURRENCY)
-        .connection_pool_size(128)
-        .pool_timeout(30.0)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
