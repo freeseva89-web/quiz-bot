@@ -1565,21 +1565,21 @@ async def run_one_schedule(application: Application, row):
         # If so, leave the schedule as completed only after the scheduled quiz's
         # own active state has actually appeared; otherwise retry as pending.
         await asyncio.sleep(1)
-        live_state = await redis_client.hgetall(f"quiz_state:{chat_id}")
+                live_state = await redis_client.hgetall(f"quiz_state:{chat_id}")
         if (not await redis_client.get(f"quiz_active:{chat_id}")
                 or str(live_state.get("schedule_id", "")) != str(schedule_id)):
             await db_pool.execute("UPDATE quiz_schedules SET status='pending', started_at=NULL WHERE id=$1 AND status='running'", schedule_id)
             return
 
-                chat_key_str = str(chat_id)
+        chat_key_str = str(chat_id)
         while chat_key_str in LIVE_QUIZ_RUNTIME:
             await asyncio.sleep(3)
-
 
         await db_pool.execute(
             "UPDATE quiz_schedules SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=$1",
             schedule_id
         )
+        
         await update_schedule_card(
             application.bot, schedule_id,
             *build_schedule_card(schedule_id, row["quiz_title"], row["scheduled_at"], row["timer"], "Completed", row["scheduled_by_name"] if "scheduled_by_name" in row else "", row["scheduled_by_username"] if "scheduled_by_username" in row else "")
