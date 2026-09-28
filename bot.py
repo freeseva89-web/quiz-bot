@@ -1571,8 +1571,10 @@ async def run_one_schedule(application: Application, row):
             await db_pool.execute("UPDATE quiz_schedules SET status='pending', started_at=NULL WHERE id=$1 AND status='running'", schedule_id)
             return
 
-        while await redis_client.get(f"quiz_active:{chat_id}"):
+                chat_key_str = str(chat_id)
+        while chat_key_str in LIVE_QUIZ_RUNTIME:
             await asyncio.sleep(3)
+
 
         await db_pool.execute(
             "UPDATE quiz_schedules SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=$1",
@@ -4102,7 +4104,6 @@ def build_live_question_text(index: int, total: int, question: str) -> str:
     # and trim only the rendered copy used by Telegram.
     return q[:max(0, MAX_POLL_QUESTION_LEN-len(prefix)-1)].rstrip()+"…"
 
-
 async def run_quiz_loop(
     chat_key: str, chat_id: int, questions: list, context: ContextTypes.DEFAULT_TYPE,
     oshuffle: bool, explanation_enable: bool, timer: int, start_index: int = 1,
@@ -4111,99 +4112,118 @@ async def run_quiz_loop(
     total_questions = len(questions); paused_exit = False; reset_exit = False
     completed_or_stopped = False; current_poll_message_id = None
     try:
-        if not session_id:
-            session_id = await redis_client.hget(f"quiz_state:{chat_key}", "session_id")
-        if not session_id: raise RuntimeError("Active quiz session_id is missing.")
         runtime = LIVE_QUIZ_RUNTIME.get(chat_key)
-        if runtime is None or runtime.get("session_id") != session_id:
-            runtime = await load_runtime_checkpoint(chat_key, session_id)
+        if runtime is None or (session_id and runtime.get("session_id") != session_id):
+            runtime = _new_runtime(session_id or "live")
             LIVE_QUIZ_RUNTIME[chat_key] = runtime
+
         index = max(1, int(start_index), int(runtime.get("next_index", 1)))
+        
         while index <= total_questions:
-            state = await redis_client.hgetall(f"quiz_state:{chat_key}")
-            if not state: raise RuntimeError("Active quiz state disappeared.")
-            if state.get("session_id") != session_id: return
-            reset_flag, stop_flag, pause_flag, active_flag = await redis_client.mget(
-                f"quiz_reset:{chat_key}", f"quiz_stop:{chat_key}", f"quiz_pause:{chat_key}", f"quiz_active:{chat_key}")
-            if reset_flag: runtime["reset"] = True; reset_exit = True; return
-            if stop_flag: runtime["stop"] = True
-            if pause_flag: runtime["pause"] = True; paused_exit = True; return
-            if not active_flag and not runtime.get("stop"): return
-            if runtime.get("stop"): completed_or_stopped = True; break
-            q = questions[index - 1]; options = list(q["options"]); correct_index = int(q["correct"])
+            # PURE IN-MEMORY CONTROL CHECK (ZERO REDIS)
+            if runtime.get("reset"):
+                reset_exit = True
+                return
+            if runtime.get("pause"):
+                paused_exit = True
+                return
+            if runtime.get("stop") or runtime.get("cancelled"):
+                completed_or_stopped = True
+                break
+
+            q = questions[index - 1]
+            options = list(q["options"])
+            correct_index = int(q["correct"])
+            
             if oshuffle:
-                indexed = list(enumerate(options)); random.shuffle(indexed); options = [opt for _, opt in indexed]
-                correct_index = next(n for n,(original_index,_) in enumerate(indexed) if original_index == q["correct"])
+                indexed = list(enumerate(options))
+                random.shuffle(indexed)
+                options = [opt for _, opt in indexed]
+                correct_index = next(n for n, (original_index, _) in enumerate(indexed) if original_index == q["correct"])
+                
             explanation = q.get("explanation") if explanation_enable else None
+            
             try:
-                poll_msg = await send_poll_with_rate_limit(context, chat_id,
-                    build_live_question_text(index,total_questions,q["question"]), options,
-                    correct_index, explanation, timer=timer, is_anonymous=False, publish_mode=False)
+                poll_msg = await send_poll_with_rate_limit(
+                    context, chat_id,
+                    build_live_question_text(index, total_questions, q["question"]),
+                    options, correct_index, explanation, timer=timer,
+                    is_anonymous=False, publish_mode=False
+                )
             except Exception:
-                logger.exception("Poll delivery failed. chat=%s question=%s",chat_key,index)
-                try: await context.bot.send_message(chat_id,"❌ Quiz stopped because the next question could not be sent. Please start the quiz again.")
+                logger.exception("Poll delivery failed. chat=%s question=%s", chat_key, index)
+                try:
+                    await context.bot.send_message(chat_id, "❌ Quiz stopped because the next question could not be sent.")
+                except TelegramError:
+                    pass
+                return
+
+            current_poll_message_id = poll_msg.message_id
+            poll_id = poll_msg.poll.id
+            q_start_time = time.time()
+
+            runtime["poll_id"] = poll_id
+            runtime["poll_message_id"] = poll_msg.message_id
+            runtime["poll_mapping"] = {"chat_key": chat_key, "session_id": session_id, "correct": correct_index, "start_time": q_start_time}
+            runtime["poll_history"][poll_id] = dict(runtime["poll_mapping"])
+            runtime["answered_by_poll"][poll_id] = set()
+            runtime["next"] = False
+            runtime["event"].clear()
+
+            is_private = chat_id > 0
+            
+            # TIMER WAIT (PURE IN-MEMORY EVENT, NO REDIS QUERIES)
+            try:
+                await asyncio.wait_for(runtime["event"].wait(), timeout=max(0.1, float(timer)))
+            except asyncio.TimeoutError:
+                pass
+
+            if runtime.get("reset"):
+                reset_exit = True
+                try: await context.bot.stop_poll(chat_id, poll_msg.message_id)
                 except TelegramError: pass
                 return
-            current_poll_message_id = poll_msg.message_id; poll_id = poll_msg.poll.id; q_start_time = time.time()
-            runtime["poll_id"] = poll_id; runtime["poll_message_id"] = poll_msg.message_id
-            runtime["poll_mapping"] = {"chat_key":chat_key,"session_id":session_id,"correct":correct_index,"start_time":q_start_time}
-            runtime["poll_history"][poll_id] = dict(runtime["poll_mapping"])
-            runtime["answered_by_poll"][poll_id] = set(); runtime["next"] = False; runtime["event"].clear()
-            await redis_client.hset(f"quiz_current_poll:{chat_key}",mapping={"message_id":poll_msg.message_id,"poll_id":poll_id})
-            await redis_client.set(f"quiz_index:{chat_key}",str(index),ex=86400)
-            is_private = chat_id > 0
-            while True:
-                try: await asyncio.wait_for(runtime["event"].wait(),timeout=max(0.1,float(timer)))
-                except asyncio.TimeoutError: break
-                runtime["event"].clear()
-                if runtime.get("reset"):
-                    reset_exit=True
-                    try: await context.bot.stop_poll(chat_id,poll_msg.message_id)
-                    except TelegramError: pass
-                    return
-                if runtime.get("stop") or runtime.get("cancelled"):
-                    completed_or_stopped=True
-                    try: await context.bot.stop_poll(chat_id,poll_msg.message_id)
-                    except TelegramError: pass
-                    break
-                if runtime.get("pause"):
-                    paused_exit=True
-                    try: await context.bot.stop_poll(chat_id,poll_msg.message_id)
-                    except TelegramError: pass
-                    return
-                if is_private and runtime.get("next"):
-                    runtime["next"] = False; break
+                
+            if runtime.get("stop") or runtime.get("cancelled"):
+                completed_or_stopped = True
+                try: await context.bot.stop_poll(chat_id, poll_msg.message_id)
+                except TelegramError: pass
+                break
+                
+            if runtime.get("pause"):
+                paused_exit = True
+                try: await context.bot.stop_poll(chat_id, poll_msg.message_id)
+                except TelegramError: pass
+                return
+
             runtime["next_index"] = index + 1
-            await flush_runtime_checkpoint(chat_key,runtime,next_index=index+1)
-            await redis_client.delete(f"quiz_current_poll:{chat_key}"); current_poll_message_id=None
-            if reset_exit or paused_exit: return
-            if completed_or_stopped: break
+            current_poll_message_id = None
             index += 1
-            await redis_client.set(f"quiz_index:{chat_key}",str(index),ex=86400)
             await asyncio.sleep(2.0)
-        completed_or_stopped=True
+
+        completed_or_stopped = True
     except asyncio.CancelledError:
-        logger.info("Quiz task cancelled. chat=%s",chat_key); raise
+        logger.info("Quiz task cancelled. chat=%s", chat_key)
+        raise
     except Exception:
-        logger.exception("Unexpected LIVE QUIZ ENGINE failure. chat=%s",chat_key)
+        logger.exception("Unexpected LIVE QUIZ ENGINE failure. chat=%s", chat_key)
         try:
-            if current_poll_message_id is not None: await context.bot.stop_poll(chat_id,current_poll_message_id)
-        except TelegramError: pass
-        try: await context.bot.send_message(chat_id,"❌ A quiz engine error occurred and the quiz was stopped. Please start the quiz again.")
-        except TelegramError: pass
+            if current_poll_message_id is not None:
+                await context.bot.stop_poll(chat_id, current_poll_message_id)
+        except TelegramError:
+            pass
         return
     finally:
         if completed_or_stopped and not paused_exit and not reset_exit:
             try:
-                runtime=LIVE_QUIZ_RUNTIME.get(chat_key)
-                if runtime is not None: await flush_runtime_checkpoint(chat_key,runtime)
-                await redis_client.set(f"quiz_finish_pending:{chat_key}","1",ex=QUIZ_STATE_TTL)
-                delivered=await finish_quiz(chat_key,context,chat_id=chat_id)
-                if not delivered: track_task(asyncio.create_task(retry_finish_quiz(chat_key,context,chat_id=chat_id)))
-                else: LIVE_QUIZ_RUNTIME.pop(chat_key,None)
+                delivered = await finish_quiz(chat_key, context, chat_id=chat_id)
+                if not delivered:
+                    track_task(asyncio.create_task(retry_finish_quiz(chat_key, context, chat_id=chat_id)))
+                else:
+                    LIVE_QUIZ_RUNTIME.pop(chat_key, None)
             except Exception:
-                logger.exception("Failed to finish quiz. chat=%s",chat_key)
-                track_task(asyncio.create_task(retry_finish_quiz(chat_key,context,chat_id=chat_id)))
+                logger.exception("Failed to finish quiz. chat=%s", chat_key)
+                track_task(asyncio.create_task(retry_finish_quiz(chat_key, context, chat_id=chat_id)))
 
 
 # ==========================================
@@ -4236,7 +4256,7 @@ async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.warning("Invalid in-memory poll mapping received. poll=%s",poll_id)
     except Exception:
         logger.exception("Poll answer processing failed. poll=%s user=%s",poll_id,user.id)
-
+        
 
 # ==========================================
 # 18. FINISH QUIZ / RESULTS
