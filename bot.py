@@ -1515,35 +1515,22 @@ async def schedule_worker(application: Application):
             logger.exception("❌ Schedule worker loop error; retrying in 30s.")
             await asyncio.sleep(30)
 
-
 async def run_one_schedule(application: Application, row):
-    schedule_id = int(row["id"])
-    chat_id = int(row["target_chat_id"])
-    lock = redis_client.lock(f"lock:schedule_start:{chat_id}", timeout=30)
+    schedule_id = row["id"]
+    chat_id = row["chat_id"]
+    lock = redis_client.lock(f"lock:schedule:{schedule_id}", timeout=60)
     try:
-        # Only one scheduled quiz may pass the start gate for a group at a time.
-        # Other schedules wait here until the current quiz finishes.
+        acquired = await lock.acquire(blocking=False)
+        if not acquired:
+            return
+        
         while True:
-            acquired = await lock.acquire(blocking=False)
-            if not acquired:
-                await asyncio.sleep(2)
-                continue
-            try:
-                if await redis_client.get(f"quiz_active:{chat_id}"):
-                    # Release while waiting so the currently running quiz and other
-                    # scheduler operations are never blocked by this task.
-                    pass
-                else:
-                    break
-            finally:
-                if await redis_client.get(f"quiz_active:{chat_id}"):
-                    try:
-                        await lock.release()
-                    except Exception:
-                        pass
+            if await redis_client.get(f"quiz_active:{chat_id}"):
+                pass
+            else:
+                break
             await asyncio.sleep(2)
 
-        # Final 5-minute rule check against any still-pending schedule.
         adapter = ScheduleContext(application.bot)
         adapter.user_data.update({
             "owner_id": int(row["owner_id"]),
@@ -1561,11 +1548,8 @@ async def run_one_schedule(application: Application, row):
         except Exception:
             pass
 
-        # begin_quiz can refuse because a quiz became active between checks.
-        # If so, leave the schedule as completed only after the scheduled quiz's
-        # own active state has actually appeared; otherwise retry as pending.
         await asyncio.sleep(1)
-                live_state = await redis_client.hgetall(f"quiz_state:{chat_id}")
+        live_state = await redis_client.hgetall(f"quiz_state:{chat_id}")
         if (not await redis_client.get(f"quiz_active:{chat_id}")
                 or str(live_state.get("schedule_id", "")) != str(schedule_id)):
             await db_pool.execute("UPDATE quiz_schedules SET status='pending', started_at=NULL WHERE id=$1 AND status='running'", schedule_id)
@@ -1579,10 +1563,10 @@ async def run_one_schedule(application: Application, row):
             "UPDATE quiz_schedules SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE id=$1",
             schedule_id
         )
-        
+
         await update_schedule_card(
             application.bot, schedule_id,
-            *build_schedule_card(schedule_id, row["quiz_title"], row["scheduled_at"], row["timer"], "Completed", row["scheduled_by_name"] if "scheduled_by_name" in row else "", row["scheduled_by_username"] if "scheduled_by_username" in row else "")
+            *build_schedule_card(schedule_id, row["quiz_title"], row["scheduled_at"], row["timer"], "Completed", row["scheduled_by_name"])
         )
     except Exception:
         logger.exception("Scheduled quiz failed id=%s", schedule_id)
@@ -1590,13 +1574,14 @@ async def run_one_schedule(application: Application, row):
             await lock.release()
         except Exception:
             pass
-        retry_row = await db_pool.fetchrow("UPDATE quiz_schedules SET retry_count=COALESCE(retry_count,0)+1 WHERE id=$1 AND status='running' RETURNING retry_count", schedule_id)
-        retry_count=int(retry_row["retry_count"] or 0) if retry_row else 0
+        retry_row = await db_pool.fetchrow("UPDATE quiz_schedules SET retry_count=COALESCE(retry_count,0)+1 WHERE id=$1 RETURNING retry_count", schedule_id)
+        retry_count = int(retry_row["retry_count"] or 0) if retry_row else 0
         if retry_count >= 3:
-            await db_pool.execute("UPDATE quiz_schedules SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=$1 AND status='running'", schedule_id)
-            await update_schedule_card(application.bot, schedule_id, *build_schedule_card(schedule_id, row["quiz_title"], row["scheduled_at"], row["timer"], "Failed", row["scheduled_by_name"] if "scheduled_by_name" in row else "", row["scheduled_by_username"] if "scheduled_by_username" in row else ""))
+            await db_pool.execute("UPDATE quiz_schedules SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=$1", schedule_id)
+            await update_schedule_card(application.bot, schedule_id, *build_schedule_card(schedule_id, row["quiz_title"], row["scheduled_at"], row["timer"], "Failed", row["scheduled_by_name"]))
         else:
             await db_pool.execute("UPDATE quiz_schedules SET status='pending', started_at=NULL WHERE id=$1 AND status='running'", schedule_id)
+
 
 
 async def recover_active_quizzes(application: Application):
