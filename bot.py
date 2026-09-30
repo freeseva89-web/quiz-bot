@@ -3042,7 +3042,7 @@ async def send_poll_with_rate_limit(
                         "chat_id": chat_id,
                         "question": question,
                         "options": options,
-                        "type": Poll.QUIZ,
+                        "type": Poll.QUIZ if (publish_mode or chat_id > 0) else Poll.REGULAR,
                         "allows_multiple_answers": False,
                         "is_anonymous": is_anonymous,
                     }
@@ -3068,6 +3068,11 @@ async def send_poll_with_rate_limit(
                             5,
                             int(timer)
                         )
+                    
+                    if poll_kwargs["type"] == Poll.REGULAR:
+                        poll_kwargs.pop("correct_option_ids", None)
+                        poll_kwargs.pop("correct_option_id", None)
+                        poll_kwargs.pop("explanation", None)
 
                     result = await context.bot.send_poll(**poll_kwargs)
                     chat_last_send_at[str(chat_id)] = time.monotonic()
@@ -4182,6 +4187,16 @@ async def run_quiz_loop(
                 except TelegramError: pass
                 return
 
+            # Group me Anti-Cheat Answer Card (Poll freeze hone ke theek baad)
+            if not is_private:
+                correct_text = options[correct_index]
+                opt_letter = chr(65 + correct_index)
+                msg = f"💡 <b>Correct Answer:</b> {opt_letter}) {safe_html(correct_text)}"
+                if explanation and str(explanation).strip():
+                    msg += f"\n📝 <b>Explanation:</b> {safe_html(explanation)}"
+                await context.bot.send_message(chat_id, msg, parse_mode="HTML")
+
+            
             runtime["next_index"] = index + 1
             current_poll_message_id = None
             index += 1
