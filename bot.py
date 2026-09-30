@@ -4206,9 +4206,9 @@ async def run_quiz_loop(
             current_poll_message_id = None
             index += 1
             if is_private:
-            await asyncio.sleep(1.5)
+                await asyncio.sleep(1.5)
         else:
-            await asyncio.sleep(4.0)
+                await asyncio.sleep(4.0)
 
         completed_or_stopped = True
     except asyncio.CancelledError:
