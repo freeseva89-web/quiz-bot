@@ -4201,16 +4201,19 @@ async def run_quiz_loop(
                         f"💡 <b>Explanation:</b> {safe_html(explanation)}"
                     )
                 await context.bot.send_message(chat_id, msg, parse_mode="HTML")
-            
+
             runtime["next_index"] = index + 1
             current_poll_message_id = None
             index += 1
+
             if is_private:
                 await asyncio.sleep(1.5)
-        else:
+            else:
                 await asyncio.sleep(4.0)
 
         completed_or_stopped = True
+
+
     except asyncio.CancelledError:
         logger.info("Quiz task cancelled. chat=%s", chat_key)
         raise
