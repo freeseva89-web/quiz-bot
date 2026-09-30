@@ -4189,13 +4189,18 @@ async def run_quiz_loop(
 
             # Group me Anti-Cheat Answer Card (Poll freeze hone ke theek baad)
             if not is_private:
-                correct_text = options[correct_index]
+                correct_text = safe_html(options[correct_index])
                 opt_letter = chr(65 + correct_index)
-                msg = f"💡 <b>Correct Answer:</b> {opt_letter}) {safe_html(correct_text)}"
+                msg = (
+                    f"🎯 <b>Correct Option : ({opt_letter})</b>\n"
+                    f"✅ <b>{correct_text}</b>"
+                )
                 if explanation and str(explanation).strip():
-                    msg += f"\n📝 <b>Explanation:</b> {safe_html(explanation)}"
+                    msg += (
+                        "\n───────────────────\n"
+                        f"💡 <b>Explanation:</b> {safe_html(explanation)}"
+                    )
                 await context.bot.send_message(chat_id, msg, parse_mode="HTML")
-
             
             runtime["next_index"] = index + 1
             current_poll_message_id = None
