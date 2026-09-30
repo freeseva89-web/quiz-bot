@@ -1517,7 +1517,8 @@ async def schedule_worker(application: Application):
 
 async def run_one_schedule(application: Application, row):
     schedule_id = row["id"]
-    chat_id = row["chat_id"]
+    chat_id = int(row.get("target_chat_id") or row.get("chat_id"))
+
     lock = redis_client.lock(f"lock:schedule:{schedule_id}", timeout=60)
     try:
         acquired = await lock.acquire(blocking=False)
