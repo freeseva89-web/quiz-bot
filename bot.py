@@ -4421,7 +4421,7 @@ async def run_quiz_loop(
             if is_private:
                 await asyncio.sleep(1.5)
             else:
-                await asyncio.sleep(4.0)
+                await asyncio.sleep(1.5)
 
         completed_or_stopped = True
 
