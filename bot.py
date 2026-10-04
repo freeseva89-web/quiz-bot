@@ -4642,7 +4642,7 @@ async def finish_quiz(
                     f"➖ <b>NEGATIVE MARKING:</b> {safe_html('OFF' if penalty == 0 else f'-{penalty:.2f}')}\n"
                     f"────────────────────\n"
                     f"👤 {safe_html(r['name'])}\n"
-                    f"🎖️ <b>Rank:</b> 1 / 1\n"
+                    f"🏆 <b>Rank:</b> 1 / 1\n"
                     f"💯 <b>Score:</b> {scr_str}\n"
                     f"✅ <b>Right:</b> {r['correct']:02d}\n"
                     f"❌ <b>Wrong:</b> {r['incorrect']:02d}\n"
