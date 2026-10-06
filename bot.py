@@ -3180,7 +3180,7 @@ async def send_poll_with_rate_limit(
                         "chat_id": chat_id,
                         "question": question,
                         "options": options,
-                        "type": Poll.QUIZ if (publish_mode or chat_id > 0) else Poll.REGULAR,
+                        "type": Poll.QUIZ,
                         "allows_multiple_answers": False,
                         "is_anonymous": is_anonymous,
                     }
@@ -3207,10 +3207,6 @@ async def send_poll_with_rate_limit(
                             int(timer)
                         )
                     
-                    if poll_kwargs["type"] == Poll.REGULAR:
-                        poll_kwargs.pop("correct_option_ids", None)
-                        poll_kwargs.pop("correct_option_id", None)
-                        poll_kwargs.pop("explanation", None)
 
                     result = await context.bot.send_poll(**poll_kwargs)
                     chat_last_send_at[str(chat_id)] = time.monotonic()
