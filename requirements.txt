@@ -5,5 +5,3 @@ aiohttp
 openpyxl
 pypdf
 python-docx
-reportlab>=4.4.0
-uharfbuzz>=0.40.0
